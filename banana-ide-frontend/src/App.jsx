@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import CodeEditor from './components/CodeEditor';
 import Console from './components/Console';
 import RunButton from './components/RunButton';
@@ -11,20 +11,14 @@ function App() {
   const [isWaitingForInput, setIsWaitingForInput] = useState(false);
   const [currentPrompt, setCurrentPrompt] = useState('');
   const [sessionId, setSessionId] = useState(null);
-  const [inputTokens, setInputTokens] = useState([]);
-  const [currentTokenIndex, setCurrentTokenIndex] = useState(0);
-  const pollingIntervalRef = useRef(null);
+  
+  // No longer need inputTokens state, refs are sufficient
   const inputTokensRef = useRef([]);
   const currentTokenIndexRef = useRef(0);
+  const pollingIntervalRef = useRef(null);
 
-  const stopPolling = () => {
-    if (pollingIntervalRef.current) {
-      clearInterval(pollingIntervalRef.current);
-      pollingIntervalRef.current = null;
-    }
-  };
-
-  const pollForStatus = async (sessionIdToPoll) => {
+  // Centralized polling function
+  const pollForStatus = useCallback(async (sessionIdToPoll) => {
     try {
       const response = await fetch(`http://localhost:3001/api/status/${sessionIdToPoll}`);
       const data = await response.json();
@@ -32,20 +26,22 @@ function App() {
       if (data.complete) {
         stopPolling();
         setIsWaitingForInput(false);
-        setOutput(data.output || output);
+        setOutput(data.output || '(No output)');
         setSessionId(null);
-        setInputTokens([]);
-        setCurrentTokenIndex(0);
         inputTokensRef.current = [];
         currentTokenIndexRef.current = 0;
       } else if (data.needsInput) {
-        // Check if we have more tokens to send
-        if (inputTokensRef.current.length > currentTokenIndexRef.current + 1) {
-          // We have more tokens, send the next one automatically
-          const nextIndex = currentTokenIndexRef.current + 1;
-          currentTokenIndexRef.current = nextIndex;
-          setCurrentTokenIndex(nextIndex);
-          await sendNextToken(inputTokensRef.current[nextIndex], nextIndex, inputTokensRef.current);
+        // Backend needs a token
+        const nextIndex = currentTokenIndexRef.current; // Check current index
+        
+        if (inputTokensRef.current.length > nextIndex) {
+          // We have a token to send
+          currentTokenIndexRef.current = nextIndex + 1; // Increment *before* sending
+          
+          // Send the token, but don't start a new poll
+          // The current poll loop will continue
+          await sendToken(inputTokensRef.current[nextIndex], sessionIdToPoll);
+          
         } else {
           // No more tokens, wait for user input
           stopPolling();
@@ -62,15 +58,32 @@ function App() {
     } catch (error) {
       console.error('Polling error:', error);
       stopPolling();
+      setOutput((prev) => prev + '\n🚫 Polling error: ' + error.message);
     }
+  }, [output]); // Include output to prevent stale closures
+
+  const stopPolling = () => {
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
+  };
+  
+  const startPolling = (sessionIdToPoll) => {
+    stopPolling(); // Clear any existing interval
+    
+    pollingIntervalRef.current = setInterval(() => {
+      pollForStatus(sessionIdToPoll);
+    }, 300); // Poll every 300ms
+    
+    // Also poll immediately
+    setTimeout(() => pollForStatus(sessionIdToPoll), 100);
   };
 
   const handleRun = async () => {
     setOutput('Executing...');
     setIsWaitingForInput(false);
     setSessionId(null);
-    setInputTokens([]);
-    setCurrentTokenIndex(0);
     inputTokensRef.current = [];
     currentTokenIndexRef.current = 0;
     stopPolling();
@@ -78,25 +91,29 @@ function App() {
     try {
       const response = await fetch('http://localhost:3001/api/run', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code }),
       });
 
       const data = await response.json();
       
       if (response.ok) {
+        setSessionId(data.sessionId); // Always set session ID
+        setOutput(data.output || '');
+        
         if (data.needsInput) {
-          // Program needs input
+          // Program needs input immediately
           setIsWaitingForInput(true);
           setCurrentPrompt(data.prompt || 'Input needed');
-          setSessionId(data.sessionId);
-          setOutput(data.output || '');
-        } else {
-          // Program completed
+          // Start polling to check for status
+          startPolling(data.sessionId);
+        } else if (data.complete) {
+          // Program completed immediately
           const outputText = (data.output || '').trim();
           setOutput(outputText || '(No output - program executed successfully)');
+        } else {
+          // Program is running but doesn't need input yet
+          startPolling(data.sessionId);
         }
       } else {
         const errorMsg = data.error || 'Unknown error';
@@ -108,6 +125,40 @@ function App() {
     }
   };
 
+  // Simplified token sending function
+  const sendToken = async (token, sessionIdToSend) => {
+    if (!sessionIdToSend) return false;
+    
+    try {
+      const response = await fetch('http://localhost:3001/api/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          sessionId: sessionIdToSend,
+          inputToken: token
+        }),
+      });
+
+      const data = await response.json();
+      
+      if (!response.ok) {
+        setOutput((prev) => prev + `\n🚫 Error: ${data.error || 'Failed to send input'}`);
+        stopPolling(); // Stop if sending failed
+        return false;
+      }
+      
+      // Success!
+      setIsWaitingForInput(false); // We've sent it, now we're waiting
+      setInputValue(''); // Clear input
+      return true;
+      
+    } catch (error) {
+      setOutput((prev) => prev + `\n🚫 Error: Failed to send input: ${error.message}`);
+      stopPolling();
+      return false;
+    }
+  };
+
   const handleSendInput = async (tokens) => {
     if (!sessionId || tokens.length === 0) return;
     
@@ -116,56 +167,19 @@ function App() {
     setOutput(prevOutput => prevOutput + inputDisplay);
     
     // Store tokens and send them one at a time
-    setInputTokens(tokens);
     inputTokensRef.current = tokens;
-    setCurrentTokenIndex(0);
     currentTokenIndexRef.current = 0;
     
     // Send first token
-    await sendNextToken(tokens[0], 0, tokens);
-  };
-
-  const sendNextToken = async (token, index, allTokens) => {
-    if (!sessionId) return;
+    // We update the index *after* sending
+    const firstToken = inputTokensRef.current[0];
+    currentTokenIndexRef.current = 1;
     
-    try {
-      // Send the token to the backend
-      const response = await fetch('http://localhost:3001/api/run', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ 
-          sessionId: sessionId,
-          inputToken: token
-        }),
-      });
-
-      const data = await response.json();
-      
-      if (response.ok) {
-        // Start polling for status updates
-        setIsWaitingForInput(false);
-        setInputValue('');
-        
-        // Poll for status updates
-        if (pollingIntervalRef.current) {
-          clearInterval(pollingIntervalRef.current);
-        }
-        
-        pollingIntervalRef.current = setInterval(() => {
-          pollForStatus(sessionId);
-        }, 300); // Poll every 300ms
-        
-        // Also poll immediately
-        setTimeout(() => pollForStatus(sessionId), 100);
-      } else {
-        setOutput(`🚫 Error: ${data.error || 'Failed to send input'}`);
-        setIsWaitingForInput(false);
-      }
-    } catch (error) {
-      setOutput(`🚫 Error: Failed to send input: ${error.message}`);
-      setIsWaitingForInput(false);
+    const success = await sendToken(firstToken, sessionId);
+    
+    if (success) {
+      // Input was sent, restart polling to see what happens next
+      startPolling(sessionId);
     }
   };
 

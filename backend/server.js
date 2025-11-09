@@ -20,10 +20,9 @@ app.use(express.json({ limit: '10mb' }));
 const JAVA_SRC_DIR = path.join(__dirname, '../CornHacks2025/src');
 const JAVA_CLASS_DIR = path.join(__dirname, '../CornHacks2025');
 
-// Compile Java files if needed
+// (No changes to compileJava)
 async function compileJava() {
   try {
-    // Compile all Java files in the src directory
     const bananalangFiles = [
       path.join(JAVA_SRC_DIR, 'bananalang', 'BananaInterpreter.java'),
       path.join(JAVA_SRC_DIR, 'bananalang', 'BananaParser.java'),
@@ -45,7 +44,6 @@ async function compileJava() {
     console.error('Compilation error:', error.message);
     if (error.stderr) console.error('Compilation stderr:', error.stderr);
     if (error.stdout) console.error('Compilation stdout:', error.stdout);
-    // Continue anyway - might already be compiled
   }
 }
 
@@ -62,11 +60,11 @@ function runJavaWithInteractiveInput(classpath, tempFile, sessionId, onOutput, o
       encoding: 'utf8'
     });
 
-    let stdout = '';
+    // let stdout = ''; // Redundant, we'll use processInfo.outputBuffer
     let stderr = '';
-    let outputBuffer = '';
     let lastOutputTime = Date.now();
     let checkInterval = null;
+    let processEnded = false; // Flag to stop interval
 
     // Store process info for input
     const processInfo = {
@@ -75,43 +73,28 @@ function runJavaWithInteractiveInput(classpath, tempFile, sessionId, onOutput, o
       outputBuffer: '',
       waitingForInput: false,
       lastPrompt: null,
-      inputRequested: false,
-      inputQueue: [] // Queue of inputs to send
+      inputRequested: false, // Flag to ensure we only ask for input once
     };
     activeProcesses.set(sessionId, processInfo);
 
     javaProcess.stdout.on('data', (data) => {
       const text = data.toString();
-      stdout += text;
-      outputBuffer += text;
       processInfo.outputBuffer += text;
-      lastOutputTime = Date.now();
+      lastOutputTime = Date.now(); // Reset timer on any output
       
-      // Check for prompt patterns - prompts typically end with ": " or ":"
-      const lines = outputBuffer.split('\n');
-      outputBuffer = lines.pop() || '';
-      
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        // Detect prompts like "1st number: ", "2nd number: ", "op: "
-        if (line.endsWith(':') || line.endsWith(': ')) {
-          // Found a prompt - the next PUSH_INPUT will need input
-          processInfo.waitingForInput = true;
-          processInfo.lastPrompt = line;
-          processInfo.inputRequested = false; // Reset for new prompt
-        }
-      }
-      
-      // Call output callback if provided
       if (onOutput) {
         onOutput(text);
       }
     });
 
     javaProcess.stderr.on('data', (data) => {
-      stderr += data.toString();
+      const text = data.toString();
+      stderr += text;
+      processInfo.outputBuffer += text; // Add stderr to the buffer too
+      lastOutputTime = Date.now(); // Reset timer on any output
+      
       if (onOutput) {
-        onOutput(data.toString());
+        onOutput(text);
       }
     });
 
@@ -119,6 +102,11 @@ function runJavaWithInteractiveInput(classpath, tempFile, sessionId, onOutput, o
 
     // Monitor for when process is waiting for input
     checkInterval = setInterval(() => {
+      if (processEnded) {
+        clearInterval(checkInterval);
+        return;
+      }
+      
       const now = Date.now();
       const processInfo = activeProcesses.get(sessionId);
       
@@ -127,28 +115,36 @@ function runJavaWithInteractiveInput(classpath, tempFile, sessionId, onOutput, o
         return;
       }
       
-      // If no output for 300ms and we detected a prompt, request input (only once per prompt)
-      if (now - lastOutputTime > 300 && processInfo.waitingForInput && !processInfo.inputRequested) {
+      // *** ROBUSTNESS FIX ***
+      // If no output for 300ms and we haven't already requested input,
+      // assume the process is waiting.
+      if (now - lastOutputTime > 300 && !processInfo.inputRequested) {
         processInfo.inputRequested = true;
+        processInfo.waitingForInput = true;
+        // We can't reliably get the prompt, so use a generic one
+        processInfo.lastPrompt = 'Input needed'; 
+        
         if (onInputNeeded) {
-          onInputNeeded(processInfo.lastPrompt || 'Input needed');
+          onInputNeeded(processInfo.lastPrompt);
         }
       }
-    }, 100);
+    }, 100); // Check every 100ms
 
     javaProcess.on('close', (code) => {
+      processEnded = true; // Stop the interval
       clearInterval(checkInterval);
       activeProcesses.delete(sessionId);
       
       resolve({ 
-        stdout, 
-        stderr, 
+        stdout: processInfo.outputBuffer, // Use the full buffer
+        stderr: stderr, // Stderr is already in outputBuffer, but we keep this for consistency
         code,
         complete: true
       });
     });
 
     javaProcess.on('error', (error) => {
+      processEnded = true;
       clearInterval(checkInterval);
       activeProcesses.delete(sessionId);
       reject(error);
@@ -175,7 +171,7 @@ function runJavaWithInteractiveInput(classpath, tempFile, sessionId, onOutput, o
   });
 }
 
-// Helper to provide input to an active process
+// (No changes to provideInputToProcess)
 function provideInputToProcess(sessionId, inputToken) {
   const processInfo = activeProcesses.get(sessionId);
   if (!processInfo || !processInfo.process || processInfo.process.killed) {
@@ -187,7 +183,7 @@ function provideInputToProcess(sessionId, inputToken) {
       processInfo.stdin.write(inputToken + '\n');
       // Reset waiting flags - input has been provided
       processInfo.waitingForInput = false;
-      processInfo.inputRequested = false;
+      processInfo.inputRequested = false; // Re-arm the detector
       processInfo.lastPrompt = null;
       return { success: true };
     } else {
@@ -201,7 +197,6 @@ function provideInputToProcess(sessionId, inputToken) {
 // API endpoint to process Banana code with interactive input
 app.post('/api/run', async (req, res) => {
   let tempFile = null;
-  const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   
   try {
     const { code, sessionId: existingSessionId, inputToken } = req.body;
@@ -223,6 +218,9 @@ app.post('/api/run', async (req, res) => {
       });
     }
     
+    // --- This is a new run ---
+    const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
     if (!code) {
       return res.status(400).json({ error: 'No code provided', output: 'No code provided' });
     }
@@ -238,9 +236,14 @@ app.post('/api/run', async (req, res) => {
       // Run the Java program with the temp file path
       const classpath = `${JAVA_CLASS_DIR}:${path.join(JAVA_CLASS_DIR, 'bananalang')}`;
       
-      let accumulatedOutput = '';
-      let needsInput = false;
-      let promptText = '';
+      // *** RACE CONDITION FIX ***
+      // We will race the process completion against a promise
+      // that resolves when onInputNeeded is called.
+      
+      let inputNeededResolver;
+      const inputNeededPromise = new Promise(resolve => {
+        inputNeededResolver = resolve;
+      });
       
       // Start the process with interactive input support
       const processPromise = runJavaWithInteractiveInput(
@@ -248,80 +251,63 @@ app.post('/api/run', async (req, res) => {
         tempFile, 
         sessionId,
         (outputChunk) => {
-          // Accumulate output as it comes
-          accumulatedOutput += outputChunk;
+          // Don't need to do anything here, buffer is handled
         },
         (prompt) => {
           // Called when input is needed
-          needsInput = true;
-          promptText = prompt;
+          // Resolve the inputNeededPromise
+          inputNeededResolver({ needsInput: true, prompt: prompt });
         }
       );
 
-      // Wait a bit to see if we get output or need input
-      await new Promise(resolve => setTimeout(resolve, 500));
-      
-      // Check if we need input
-      const processInfo = activeProcesses.get(sessionId);
-      if (processInfo && processInfo.waitingForInput) {
-        // Return early asking for input
+      // Wait for EITHER the process to end OR for input to be needed
+      const raceResult = await Promise.race([processPromise, inputNeededPromise]);
+
+      if (raceResult.needsInput) {
+        // Input is needed. The process is still running.
+        // Don't delete the temp file.
+        const processInfo = activeProcesses.get(sessionId);
         return res.json({
-          output: accumulatedOutput,
+          output: processInfo ? processInfo.outputBuffer : '',
           needsInput: true,
-          prompt: processInfo.lastPrompt || 'Input needed',
+          prompt: raceResult.prompt || 'Input needed',
           sessionId: sessionId
         });
       }
-
-      // Otherwise, wait for completion
-      const result = await processPromise;
       
+      // Otherwise, the process finished (raceResult is the result from processPromise)
+      const result = raceResult; // for clarity
+
       // Clean up temp file
       if (fs.existsSync(tempFile)) {
         fs.unlinkSync(tempFile);
         tempFile = null;
       }
 
-      // Combine stdout and stderr
-      let output = accumulatedOutput || result.stdout || '';
-      if (result.stderr && result.stderr.trim()) {
-        if (!result.stderr.includes('warning') && !result.stderr.includes('Note:')) {
-          output += (output ? '\n' : '') + result.stderr;
-        }
-      }
-
+      // Combine stdout and stderr (already in result.stdout)
+      let output = result.stdout || '';
+      
       res.json({ output: output || '', complete: true });
+
     } catch (execError) {
-      // Clean up temp file
       if (tempFile && fs.existsSync(tempFile)) {
         fs.unlinkSync(tempFile);
         tempFile = null;
       }
-
-      // Extract error message
       let errorOutput = '';
       if (execError.stdout) errorOutput += execError.stdout;
       if (execError.stderr) errorOutput += (errorOutput ? '\n' : '') + execError.stderr;
       if (!errorOutput) errorOutput = execError.message;
-
       console.error('Execution error:', errorOutput);
-
-      // Return error with output
       res.status(500).json({ 
         error: 'Execution error', 
         output: errorOutput || 'Unknown error occurred'
       });
     }
   } catch (error) {
-    // Clean up temp file if it exists
     if (tempFile && fs.existsSync(tempFile)) {
-      try {
-        fs.unlinkSync(tempFile);
-      } catch (e) {
-        // Ignore cleanup errors
-      }
+      try { fs.unlinkSync(tempFile); } catch (e) { /* ignore */ }
     }
-    
     console.error('Server error:', error);
     res.status(500).json({ 
       error: 'Server error', 
@@ -330,7 +316,7 @@ app.post('/api/run', async (req, res) => {
   }
 });
 
-// API endpoint to get current output from a running process
+// (No changes to /api/status/:sessionId)
 app.get('/api/status/:sessionId', (req, res) => {
   const { sessionId } = req.params;
   const processInfo = activeProcesses.get(sessionId);
