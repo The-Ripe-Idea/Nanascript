@@ -26,8 +26,8 @@
     "editor",
     "programming"
   ],
-  "author": "Your Name",
-  "license": "MIT",
+  "author": "Jared, Timofei, Krithik, Caleb",
+  "license": "UNL",
   "browserslist": {
     "production": [
       ">0.2%",
