@@ -1,0 +1,57 @@
+.App {
+  text-align: center;
+}
+
+.App-header {
+  background-color: #282c34;
+  padding: 20px;
+  color: white;
+  border-bottom: 2px solid #ffda57;
+}
+
+.ide-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 20px;
+  min-height: 100vh; /* This makes the container fill the screen, pushing the footer down */
+  box-sizing: border-box;
+}
+
+.emoji-key-container {
+  background-color: #20232a;
+  padding: 40px;
+  color: #abb2bf;
+  text-align: left;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.emoji-key-container h2 {
+  text-align: center;
+  color: white;
+  margin-top: 0;
+  margin-bottom: 30px;
+}
+
+.emoji-key-list {
+  list-style-type: none;
+  padding: 0;
+  max-width: 400px;
+  margin: 0 auto;
+}
+
+.emoji-key-list li {
+  font-size: 1.2rem;
+  margin-bottom: 15px;
+  display: flex;
+  align-items: center;
+}
+
+.emoji-key-list code {
+  background-color: #282c34;
+  padding: 5px 10px;
+  border-radius: 5px;
+  margin-right: 15px;
+  font-size: 1.5rem;
+}
